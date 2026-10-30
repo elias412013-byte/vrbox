@@ -1,0 +1,27 @@
+name: VRBox
+options:
+  bundleIdPrefix: com.vrbox
+targets:
+  VRBox:
+    type: application
+    platform: iOS
+    deploymentTarget: "12.0"
+    sources:
+      - VRBox
+    info:
+      path: VRBox/Info.plist
+      properties:
+        CFBundleDisplayName: VRBox
+        NSCameraUsageDescription: Se usa la camara para ver tu entorno dentro del visor VR.
+        UILaunchStoryboardName: LaunchScreen
+        UIRequiredDeviceCapabilities: [armv7]
+        UIStatusBarHidden: true
+        UIViewControllerBasedStatusBarAppearance: true
+        UISupportedInterfaceOrientations: [UIInterfaceOrientationLandscapeRight, UIInterfaceOrientationLandscapeLeft]
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.vrbox.app
+        SWIFT_VERSION: "5.0"
+        CODE_SIGNING_ALLOWED: "NO"
+        CODE_SIGNING_REQUIRED: "NO"
+        CODE_SIGN_IDENTITY: ""
