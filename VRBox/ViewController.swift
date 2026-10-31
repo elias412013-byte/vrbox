@@ -6,6 +6,7 @@ import SceneKit
 import simd
 import WebKit
 import Photos
+import GameController
 
 class ViewController: UIViewController, AVCaptureVideoDataOutputSampleBufferDelegate, WKNavigationDelegate {
 
@@ -13,6 +14,7 @@ class ViewController: UIViewController, AVCaptureVideoDataOutputSampleBufferDele
     private enum Screen { case menu, browser, gallery, photo, settings }
     private enum HandStyle { case silhouette, skeleton, debug }
     private enum TrackMode { case marker, hand }
+    private enum InputMode { case dwell, click }
 
     private struct Btn {
         let id: String
@@ -79,6 +81,9 @@ class ViewController: UIViewController, AVCaptureVideoDataOutputSampleBufferDele
     private var clickMode = false
     private var handStyle: HandStyle = .silhouette
     private var trackMode: TrackMode = .marker
+    private var inputMode: InputMode = .dwell
+    private var lastPx = CGPoint.zero
+    private var controllerName: String? = nil
     private var gazeEnabled = true
     private var windowButtons: [Btn] = []
     private var keyboardButtons: [Btn] = []
@@ -158,7 +163,11 @@ class ViewController: UIViewController, AVCaptureVideoDataOutputSampleBufferDele
         }
 
         refreshWindow()
-        view.addGestureRecognizer(UITapGestureRecognizer(target: self, action: #selector(recenter)))
+        view.addGestureRecognizer(UITapGestureRecognizer(target: self, action: #selector(screenTapped)))
+        let lp = UILongPressGestureRecognizer(target: self, action: #selector(recenterLong(_:)))
+        lp.minimumPressDuration = 1.0
+        view.addGestureRecognizer(lp)
+        setupControllers()
 
         switch AVCaptureDevice.authorizationStatus(for: .video) {
         case .authorized:
@@ -356,11 +365,13 @@ class ViewController: UIViewController, AVCaptureVideoDataOutputSampleBufferDele
         let now = CACurrentMediaTime()
 
         // 1) Puntero: dedo si hay mano, si no la mirada (centro de la vista)
-        let finger = handVisible && smoothTip != nil
+        // En modo clic el puntero es SIEMPRE el centro (la cabeza); el dedo/marcador no se usa
+        let tracking = (inputMode == .dwell)
+        let finger = tracking && handVisible && smoothTip != nil
         var pt = CGPoint(x: b.midX, y: b.midY)
         if finger, let t = smoothTip { pt = leftOverlay.mapPoint(t) }
         let calibRemaining = tracker.calibrationRemaining
-        let pointerOK = (finger || gazeEnabled || moving) && calibRemaining <= 0
+        let pointerOK = (inputMode == .click || finger || gazeEnabled || moving) && calibRemaining <= 0
 
         // 2) ¿Qué hay debajo del puntero?
         var hitID: String? = nil
@@ -382,7 +393,9 @@ class ViewController: UIViewController, AVCaptureVideoDataOutputSampleBufferDele
             }
         }
 
-        // 3) Tiempo de espera (el círculo se llena)
+        if hitID != nil { lastPx = px }
+
+        // 3) Tiempo de espera (el círculo se llena). En modo clic no hay espera.
         if hitID != hoverID {
             markDirty(hoverID)
             markDirty(hitID)
@@ -391,7 +404,7 @@ class ViewController: UIViewController, AVCaptureVideoDataOutputSampleBufferDele
             locked = false
         }
         var progress: CGFloat = 0
-        if let id = hoverID, !locked, let btn = findButton(id) {
+        if inputMode == .dwell, let id = hoverID, !locked, let btn = findButton(id) {
             let elapsed = now - hoverStart
             progress = CGFloat(max(0, min(1, elapsed / btn.dwell)))
             if elapsed >= btn.dwell {
@@ -413,20 +426,20 @@ class ViewController: UIViewController, AVCaptureVideoDataOutputSampleBufferDele
             hint = "Mirá a donde querés la pantalla y elegí FIJAR"
         } else if now < hintUntil {
             hint = hintText
-        } else if handStyle == .debug {
+        } else if handStyle == .debug && tracking {
             hint = (trackMode == .marker ? "Marcador: " : "Mano: ") + (finger ? "SÍ" : "NO") + " · celdas \(lastArea) · centro Cb/Cr \(lastCb)/\(lastCr)"
         }
         let calibRect: CGRect? = calibRemaining > 0 ? tracker.calibRect(marker: trackMode == .marker) : nil
 
-        leftOverlay.update(maskImage: lastMask, showMask: handStyle == .debug, silhouette: lastSil, showSilhouette: handStyle == .silhouette,
+        leftOverlay.update(maskImage: lastMask, showMask: handStyle == .debug && tracking, silhouette: lastSil, showSilhouette: handStyle == .silhouette && tracking,
                            palm: finger ? palmPoint : nil, tip: finger ? smoothTip : nil,
-                           showSkeleton: handStyle != .silhouette,
+                           showSkeleton: handStyle != .silhouette && tracking,
                            cursor: cursorPoint(leftOverlay, finger: finger),
                            progress: progress, hovering: hoverID != nil,
                            hint: hint, calibRect: calibRect)
-        rightOverlay.update(maskImage: lastMask, showMask: handStyle == .debug, silhouette: lastSil, showSilhouette: handStyle == .silhouette,
+        rightOverlay.update(maskImage: lastMask, showMask: handStyle == .debug && tracking, silhouette: lastSil, showSilhouette: handStyle == .silhouette && tracking,
                             palm: finger ? palmPoint : nil, tip: finger ? smoothTip : nil,
-                            showSkeleton: handStyle != .silhouette,
+                            showSkeleton: handStyle != .silhouette && tracking,
                             cursor: cursorPoint(rightOverlay, finger: finger),
                             progress: progress, hovering: hoverID != nil,
                             hint: hint, calibRect: calibRect)
@@ -462,6 +475,7 @@ class ViewController: UIViewController, AVCaptureVideoDataOutputSampleBufferDele
         case "p.back": screen = .gallery
         case "p.prev": photoIndex = max(0, photoIndex - 1); loadFull()
         case "p.next": photoIndex = min(max(0, assets.count - 1), photoIndex + 1); loadFull()
+        case "s.input": toggleInputMode()
         case "s.mode": toggleTrackMode()
         case "s.style": cycleHandStyle()
         case "s.gaze": gazeEnabled.toggle()
@@ -479,6 +493,97 @@ class ViewController: UIViewController, AVCaptureVideoDataOutputSampleBufferDele
         }
         refreshWindow()
         refreshKeyboard()
+    }
+
+    // MARK: Clic (pantalla / control)
+    @objc private func screenTapped() { clickPressed() }
+
+    @objc private func recenterLong(_ g: UILongPressGestureRecognizer) {
+        if g.state == .began {
+            needsRecenter = true
+            flashHint("Vista recentrada", 1.5)
+        }
+    }
+
+    private func clickPressed() {
+        guard tracker.calibrationRemaining <= 0, let id = hoverID, findButton(id) != nil else { return }
+        locked = true
+        hoverStart = CACurrentMediaTime()
+        perform(id, px: lastPx)
+    }
+
+    private func pressVirtual(_ id: String) {
+        if id.hasPrefix("web.") && screen != .browser { return }
+        perform(id, px: .zero)
+    }
+
+    private func toggleInputMode() {
+        inputMode = (inputMode == .click) ? .dwell : .click
+        hoverID = nil
+        locked = false
+    }
+
+    private func setupControllers() {
+        NotificationCenter.default.addObserver(self, selector: #selector(controllerConnected(_:)),
+                                               name: NSNotification.Name.GCControllerDidConnect, object: nil)
+        NotificationCenter.default.addObserver(self, selector: #selector(controllerDisconnected(_:)),
+                                               name: NSNotification.Name.GCControllerDidDisconnect, object: nil)
+        for c in GCController.controllers() { attach(c) }
+        GCController.startWirelessControllerDiscovery(completionHandler: nil)
+    }
+
+    @objc private func controllerConnected(_ n: Notification) {
+        if let c = n.object as? GCController { attach(c) }
+    }
+
+    @objc private func controllerDisconnected(_ n: Notification) {
+        controllerName = nil
+        inputMode = .dwell
+        flashHint("Control desconectado · modo espera", 3)
+        windowDirty = true
+    }
+
+    private func attach(_ c: GCController) {
+        controllerName = c.vendorName ?? "Control"
+        inputMode = .click
+        flashHint("Control conectado: " + (controllerName ?? "") + " · modo clic", 3.5)
+        windowDirty = true
+        if let p = c.extendedGamepad {
+            bindButtons(a: p.buttonA, b: p.buttonB, x: p.buttonX, y: p.buttonY,
+                        l: p.leftShoulder, r: p.rightShoulder, rt: p.rightTrigger,
+                        up: p.dpad.up, down: p.dpad.down)
+        } else if let p = c.gamepad {
+            bindButtons(a: p.buttonA, b: p.buttonB, x: p.buttonX, y: p.buttonY,
+                        l: p.leftShoulder, r: p.rightShoulder, rt: nil,
+                        up: p.dpad.up, down: p.dpad.down)
+        }
+    }
+
+    private func bindButtons(a: GCControllerButtonInput, b: GCControllerButtonInput,
+                             x: GCControllerButtonInput, y: GCControllerButtonInput,
+                             l: GCControllerButtonInput, r: GCControllerButtonInput,
+                             rt: GCControllerButtonInput?,
+                             up: GCControllerButtonInput, down: GCControllerButtonInput) {
+        func on(_ btn: GCControllerButtonInput?, _ action: @escaping () -> Void) {
+            btn?.pressedChangedHandler = { _, _, pressed in
+                if pressed { DispatchQueue.main.async { action() } }
+            }
+        }
+        on(a) { [weak self] in self?.clickPressed() }
+        on(rt) { [weak self] in self?.clickPressed() }
+        on(b) { [weak self] in self?.pressVirtual("home") }
+        on(x) { [weak self] in
+            self?.needsRecenter = true
+            self?.flashHint("Vista recentrada", 1.5)
+        }
+        on(y) { [weak self] in
+            guard let self = self else { return }
+            self.pressVirtual(self.moving ? "fix" : "move")
+        }
+        on(l) { [weak self] in self?.pressVirtual("shrink") }
+        on(r) { [weak self] in self?.pressVirtual("grow") }
+        on(up) { [weak self] in self?.pressVirtual("web.up") }
+        on(down) { [weak self] in self?.pressVirtual("web.down") }
     }
 
     private func toggleTrackMode() {
@@ -708,6 +813,7 @@ class ViewController: UIViewController, AVCaptureVideoDataOutputSampleBufferDele
             b.append(Btn(id: "p.next", title: "▶", rect: CGRect(x: 840, y: 640, width: 200, height: 70), dwell: 0.8))
         case .settings:
             let items: [(String, String)] = [
+                ("s.input", "Selección: " + (inputMode == .click ? "Mirada + clic" : "Espera")),
                 ("s.mode", "Seguimiento: " + (trackMode == .marker ? "Marcador de color" : "Mano (piel)")),
                 ("s.style", "Vista de la mano: " + handStyleName()),
                 ("s.gaze", "Selección con la mirada: " + (gazeEnabled ? "SÍ" : "NO")),
@@ -716,7 +822,7 @@ class ViewController: UIViewController, AVCaptureVideoDataOutputSampleBufferDele
                 ("s.reset", "Restablecer pantalla")
             ]
             for (i, it) in items.enumerated() {
-                b.append(Btn(id: it.0, title: it.1, rect: CGRect(x: 240, y: 100 + CGFloat(i) * 94, width: 800, height: 82)))
+                b.append(Btn(id: it.0, title: it.1, rect: CGRect(x: 240, y: 100 + CGFloat(i) * 78, width: 800, height: 70)))
             }
         }
         return b
@@ -792,8 +898,16 @@ class ViewController: UIViewController, AVCaptureVideoDataOutputSampleBufferDele
                 switch self.screen {
                 case .menu:
                     self.drawText("VRBox", in: CGRect(x: 0, y: 100, width: 1280, height: 90), size: 72, bold: true)
-                    self.drawText("Apuntá con el dedo (o mirá) 1 segundo para elegir", in: CGRect(x: 0, y: 600, width: 1280, height: 50), size: 32, color: gray)
-                    self.drawText("Primero: Calibrar (tapá el cuadro amarillo con " + (self.trackMode == .marker ? "la fibra o el marcador)" : "tu mano)"), in: CGRect(x: 0, y: 650, width: 1280, height: 50), size: 28, color: gray)
+                    if self.inputMode == .click {
+                        self.drawText("Apuntá con la cabeza y hacé clic (botón A o el botón del visor)", in: CGRect(x: 0, y: 600, width: 1280, height: 50), size: 32, color: gray)
+                    } else {
+                        self.drawText("Apuntá con el dedo (o mirá) 1 segundo para elegir", in: CGRect(x: 0, y: 600, width: 1280, height: 50), size: 32, color: gray)
+                    }
+                    if self.inputMode == .click {
+                        self.drawText("A clic · B inicio · X recentrar · Y mover · L1/R1 tamaño · cruceta scroll", in: CGRect(x: 0, y: 650, width: 1280, height: 50), size: 26, color: gray)
+                    } else {
+                        self.drawText("Primero: Calibrar (tapá el cuadro amarillo con " + (self.trackMode == .marker ? "la fibra o el marcador)" : "tu mano)"), in: CGRect(x: 0, y: 650, width: 1280, height: 50), size: 28, color: gray)
+                    }
                 case .browser:
                     if let img = self.webImage {
                         img.draw(in: CGRect(x: 0, y: 172, width: 1280, height: 548))
@@ -809,7 +923,9 @@ class ViewController: UIViewController, AVCaptureVideoDataOutputSampleBufferDele
                         self.drawText("Cargando…", in: CGRect(x: 0, y: 340, width: 1280, height: 80), size: 48, color: gray)
                     }
                 case .settings:
-                    break
+                    let pads = GCController.controllers()
+                    let info = pads.isEmpty ? "Controles detectados por la app: 0" : "Controles detectados por la app: \(pads.count) (" + (pads[0].vendorName ?? "sin nombre") + ")"
+                    self.drawText(info, in: CGRect(x: 0, y: 650, width: 1280, height: 50), size: 28, color: gray)
                 }
             }
 
