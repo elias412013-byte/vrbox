@@ -69,7 +69,7 @@ class ViewController: UIViewController, AVCaptureVideoDataOutputSampleBufferDele
     // MARK: Estado de la interfaz
     private var screen: Screen = .menu
     private var moving = false
-    private var editing = false
+    private var isTyping = false
     private var clickMode = false
     private var showDetection = true
     private var showSkeleton = true
@@ -421,13 +421,13 @@ class ViewController: UIViewController, AVCaptureVideoDataOutputSampleBufferDele
         case "home": goHome()
         case "shrink": setScale(windowScale / 1.08)
         case "grow": setScale(windowScale * 1.08)
-        case "move": moving = true; editing = false
+        case "move": moving = true; isTyping = false
         case "fix": moving = false
         case "app.browser": screen = .browser; ensureWebView(); startSnapshots()
         case "app.gallery": screen = .gallery; galleryPage = 0
         case "app.settings": screen = .settings
         case "web.back": if let w = webView, w.canGoBack { w.goBack() }
-        case "web.addr": editing = true; addressBuffer = ""
+        case "web.addr": isTyping = true; addressBuffer = ""
         case "web.go": goToAddress()
         case "web.up": scrollWeb(-200)
         case "web.down": scrollWeb(200)
@@ -459,7 +459,7 @@ class ViewController: UIViewController, AVCaptureVideoDataOutputSampleBufferDele
 
     private func goHome() {
         screen = .menu
-        editing = false
+        isTyping = false
         moving = false
         stopSnapshots()
     }
@@ -515,7 +515,7 @@ class ViewController: UIViewController, AVCaptureVideoDataOutputSampleBufferDele
 
     private func goToAddress() {
         let t = addressBuffer.trimmingCharacters(in: .whitespaces)
-        editing = false
+        isTyping = false
         guard !t.isEmpty else { return }
         ensureWebView()
         var urlStr: String
@@ -703,7 +703,7 @@ class ViewController: UIViewController, AVCaptureVideoDataOutputSampleBufferDele
 
     private func refreshKeyboard() {
         kbDirty = false
-        let show = screen == .browser && editing && !moving
+        let show = screen == .browser && isTyping && !moving
         keyboardNode.isHidden = !show
         keyboardButtons = show ? makeKeyboardButtons() : []
         if show { keyboardMat.diffuse.contents = renderKeyboard() }
@@ -771,13 +771,13 @@ class ViewController: UIViewController, AVCaptureVideoDataOutputSampleBufferDele
                 fill.setFill()
                 let path = UIBezierPath(roundedRect: b.rect, cornerRadius: 20)
                 path.fill()
-                if isAddr && self.editing {
+                if isAddr && self.isTyping {
                     UIColor.green.setStroke()
                     path.lineWidth = 3
                     path.stroke()
                 }
                 if isAddr {
-                    var t = self.editing ? self.addressBuffer + "|" : (self.currentURL.isEmpty ? "Buscar o escribir URL" : self.currentURL)
+                    var t = self.isTyping ? self.addressBuffer + "|" : (self.currentURL.isEmpty ? "Buscar o escribir URL" : self.currentURL)
                     if t.hasPrefix("https://") { t = String(t.dropFirst(8)) }
                     self.drawText(t, in: b.rect.insetBy(dx: 18, dy: 0), size: 32, align: .left)
                 } else {
