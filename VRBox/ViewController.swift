@@ -12,6 +12,7 @@ class ViewController: UIViewController, AVCaptureVideoDataOutputSampleBufferDele
     // MARK: Tipos
     private enum Screen { case menu, browser, gallery, photo, settings }
     private enum HandStyle { case silhouette, skeleton, debug }
+    private enum TrackMode { case marker, hand }
 
     private struct Btn {
         let id: String
@@ -77,6 +78,7 @@ class ViewController: UIViewController, AVCaptureVideoDataOutputSampleBufferDele
     private var isTyping = false
     private var clickMode = false
     private var handStyle: HandStyle = .silhouette
+    private var trackMode: TrackMode = .marker
     private var gazeEnabled = true
     private var windowButtons: [Btn] = []
     private var keyboardButtons: [Btn] = []
@@ -141,10 +143,16 @@ class ViewController: UIViewController, AVCaptureVideoDataOutputSampleBufferDele
         view.layer.addSublayer(leftOverlay.root)
         view.layer.addSublayer(rightOverlay.root)
 
+        tracker.markerMode = (trackMode == .marker)
         loadCalibration()
-        tracker.onCalibrated = { [weak self] a, b, c, d in
+        tracker.onCalibrationFailed = { [weak self] in
             DispatchQueue.main.async {
-                self?.saveCalibration(a, b, c, d)
+                self?.flashHint("No vi un color vivo. Acercá el marcador al cuadro y probá otra vez", 3.5)
+            }
+        }
+        tracker.onCalibrated = { [weak self] isMarker, a, b, c, d in
+            DispatchQueue.main.async {
+                self?.saveCalibration(isMarker, a, b, c, d)
                 self?.flashHint("Calibración lista ✓", 2.5)
             }
         }
@@ -305,15 +313,20 @@ class ViewController: UIViewController, AVCaptureVideoDataOutputSampleBufferDele
     private func loadCalibration() {
         let d = UserDefaults.standard
         if d.object(forKey: "cbMin") != nil {
-            tracker.setRange(cbMin: d.integer(forKey: "cbMin"), cbMax: d.integer(forKey: "cbMax"),
+            tracker.setRange(marker: false, cbMin: d.integer(forKey: "cbMin"), cbMax: d.integer(forKey: "cbMax"),
                              crMin: d.integer(forKey: "crMin"), crMax: d.integer(forKey: "crMax"))
+        }
+        if d.object(forKey: "m_cbMin") != nil {
+            tracker.setRange(marker: true, cbMin: d.integer(forKey: "m_cbMin"), cbMax: d.integer(forKey: "m_cbMax"),
+                             crMin: d.integer(forKey: "m_crMin"), crMax: d.integer(forKey: "m_crMax"))
         }
     }
 
-    private func saveCalibration(_ a: Int, _ b: Int, _ c: Int, _ d: Int) {
+    private func saveCalibration(_ isMarker: Bool, _ a: Int, _ b: Int, _ c: Int, _ d: Int) {
         let u = UserDefaults.standard
-        u.set(a, forKey: "cbMin"); u.set(b, forKey: "cbMax")
-        u.set(c, forKey: "crMin"); u.set(d, forKey: "crMax")
+        let p = isMarker ? "m_" : ""
+        u.set(a, forKey: p + "cbMin"); u.set(b, forKey: p + "cbMax")
+        u.set(c, forKey: p + "crMin"); u.set(d, forKey: p + "crMax")
     }
 
     private func flashHint(_ text: String, _ seconds: CFTimeInterval) {
@@ -395,15 +408,15 @@ class ViewController: UIViewController, AVCaptureVideoDataOutputSampleBufferDele
         // 4) Avisos y overlays
         var hint: String? = nil
         if calibRemaining > 0 {
-            hint = "Tapá el cuadro amarillo con tu mano (\(Int(ceil(calibRemaining))))"
+            hint = "Tapá el cuadro amarillo con " + (trackMode == .marker ? "la fibra o el marcador" : "tu mano") + " (\(Int(ceil(calibRemaining))))"
         } else if moving {
             hint = "Mirá a donde querés la pantalla y elegí FIJAR"
         } else if now < hintUntil {
             hint = hintText
         } else if handStyle == .debug {
-            hint = "Mano: " + (finger ? "SÍ" : "NO") + " · celdas \(lastArea) · centro Cb/Cr \(lastCb)/\(lastCr)"
+            hint = (trackMode == .marker ? "Marcador: " : "Mano: ") + (finger ? "SÍ" : "NO") + " · celdas \(lastArea) · centro Cb/Cr \(lastCb)/\(lastCr)"
         }
-        let calibRect: CGRect? = calibRemaining > 0 ? HandTracker.calibRect : nil
+        let calibRect: CGRect? = calibRemaining > 0 ? tracker.calibRect(marker: trackMode == .marker) : nil
 
         leftOverlay.update(maskImage: lastMask, showMask: handStyle == .debug, silhouette: lastSil, showSilhouette: handStyle == .silhouette,
                            palm: finger ? palmPoint : nil, tip: finger ? smoothTip : nil,
@@ -449,6 +462,7 @@ class ViewController: UIViewController, AVCaptureVideoDataOutputSampleBufferDele
         case "p.back": screen = .gallery
         case "p.prev": photoIndex = max(0, photoIndex - 1); loadFull()
         case "p.next": photoIndex = min(max(0, assets.count - 1), photoIndex + 1); loadFull()
+        case "s.mode": toggleTrackMode()
         case "s.style": cycleHandStyle()
         case "s.gaze": gazeEnabled.toggle()
         case "s.calib": tracker.beginCalibration(duration: 4.0)
@@ -465,6 +479,16 @@ class ViewController: UIViewController, AVCaptureVideoDataOutputSampleBufferDele
         }
         refreshWindow()
         refreshKeyboard()
+    }
+
+    private func toggleTrackMode() {
+        trackMode = (trackMode == .marker) ? .hand : .marker
+        tracker.markerMode = (trackMode == .marker)
+        handVisible = false
+        smoothTip = nil
+        palmPoint = nil
+        lastSil = nil
+        missCount = 0
     }
 
     private func handStyleName() -> String {
@@ -659,7 +683,7 @@ class ViewController: UIViewController, AVCaptureVideoDataOutputSampleBufferDele
             b.append(Btn(id: "app.browser", title: "Navegador", rect: CGRect(x: 240, y: 190, width: 800, height: 90)))
             b.append(Btn(id: "app.gallery", title: "Galería", rect: CGRect(x: 240, y: 290, width: 800, height: 90)))
             b.append(Btn(id: "app.settings", title: "Ajustes", rect: CGRect(x: 240, y: 390, width: 800, height: 90)))
-            b.append(Btn(id: "s.calib", title: "Calibrar mano", rect: CGRect(x: 240, y: 490, width: 800, height: 90)))
+            b.append(Btn(id: "s.calib", title: "Calibrar " + (trackMode == .marker ? "marcador" : "mano"), rect: CGRect(x: 240, y: 490, width: 800, height: 90)))
         case .browser:
             b.append(Btn(id: "web.back", title: "←", rect: CGRect(x: 20, y: 98, width: 90, height: 66), dwell: 0.8))
             b.append(Btn(id: "web.addr", title: "", rect: CGRect(x: 120, y: 98, width: 740, height: 66)))
@@ -684,9 +708,10 @@ class ViewController: UIViewController, AVCaptureVideoDataOutputSampleBufferDele
             b.append(Btn(id: "p.next", title: "▶", rect: CGRect(x: 840, y: 640, width: 200, height: 70), dwell: 0.8))
         case .settings:
             let items: [(String, String)] = [
-                ("s.style", "Mano: " + handStyleName()),
+                ("s.mode", "Seguimiento: " + (trackMode == .marker ? "Marcador de color" : "Mano (piel)")),
+                ("s.style", "Vista de la mano: " + handStyleName()),
                 ("s.gaze", "Selección con la mirada: " + (gazeEnabled ? "SÍ" : "NO")),
-                ("s.calib", "Calibrar color de piel"),
+                ("s.calib", "Calibrar " + (trackMode == .marker ? "marcador" : "color de piel")),
                 ("s.center", "Recentrar vista"),
                 ("s.reset", "Restablecer pantalla")
             ]
@@ -768,7 +793,7 @@ class ViewController: UIViewController, AVCaptureVideoDataOutputSampleBufferDele
                 case .menu:
                     self.drawText("VRBox", in: CGRect(x: 0, y: 100, width: 1280, height: 90), size: 72, bold: true)
                     self.drawText("Apuntá con el dedo (o mirá) 1 segundo para elegir", in: CGRect(x: 0, y: 600, width: 1280, height: 50), size: 32, color: gray)
-                    self.drawText("Primero: Calibrar mano (tapá el cuadro amarillo con tu mano)", in: CGRect(x: 0, y: 650, width: 1280, height: 50), size: 28, color: gray)
+                    self.drawText("Primero: Calibrar (tapá el cuadro amarillo con " + (self.trackMode == .marker ? "la fibra o el marcador)" : "tu mano)"), in: CGRect(x: 0, y: 650, width: 1280, height: 50), size: 28, color: gray)
                 case .browser:
                     if let img = self.webImage {
                         img.draw(in: CGRect(x: 0, y: 172, width: 1280, height: 548))
