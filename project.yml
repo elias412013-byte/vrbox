@@ -12,7 +12,8 @@ targets:
       path: VRBox/Info.plist
       properties:
         CFBundleDisplayName: VRBox
-        NSCameraUsageDescription: Se usa la camara para ver tu entorno dentro del visor VR.
+        NSCameraUsageDescription: Se usa la camara para ver tu entorno y detectar tu mano dentro del visor VR.
+        NSPhotoLibraryUsageDescription: Se usa para mostrar tus fotos en la Galeria del visor VR.
         UILaunchStoryboardName: LaunchScreen
         UIRequiredDeviceCapabilities: [armv7]
         UIStatusBarHidden: true
