@@ -11,6 +11,8 @@ struct HandResult {
     var imgW = 1280
     var imgH = 720
     var maskImage: CGImage? = nil
+    var centerCb = 0
+    var centerCr = 0
 }
 
 /// Detección de mano por color de piel (YCbCr) sobre una grilla pequeña.
@@ -34,7 +36,7 @@ final class HandTracker {
     var onCalibrated: ((Int, Int, Int, Int) -> Void)?
 
     private let lock = NSLock()
-    private var cbMin = 77, cbMax = 127, crMin = 133, crMax = 173
+    private var cbMin = 77, cbMax = 125, crMin = 138, crMax = 175
     private var calibrating = false
     private var calibEnd: CFTimeInterval = 0
     private var sumCb = 0.0, sumCr = 0.0, nCal = 0.0
@@ -95,12 +97,12 @@ final class HandTracker {
                 let ci = cy * cStride + cx * 2
                 let cb = Int(cPtr[ci])
                 let cr = Int(cPtr[ci + 1])
-                if sampling && gx >= HandTracker.calX0 && gx < HandTracker.calX1
+                if gx >= HandTracker.calX0 && gx < HandTracker.calX1
                     && gy >= HandTracker.calY0 && gy < HandTracker.calY1 {
                     sCb += Double(cb); sCr += Double(cr); sN += 1
                 }
                 let yy = Int(yPtr[py * yStride + px])
-                if yy > 40 && cb >= cb0 && cb <= cb1 && cr >= cr0 && cr <= cr1 {
+                if yy > 30 && cb >= cb0 && cb <= cb1 && cr >= cr0 && cr <= cr1 && (cr - cb) >= 10 {
                     mask[gy * gw + gx] = 1
                 }
             }
@@ -110,12 +112,12 @@ final class HandTracker {
         var calibDone: (Int, Int, Int, Int)? = nil
         lock.lock()
         if calibrating {
-            sumCb += sCb; sumCr += sCr; nCal += sN
+            if sampling { sumCb += sCb; sumCr += sCr; nCal += sN }
             if now >= calibEnd {
                 if nCal > 0 {
                     let mCb = Int(sumCb / nCal), mCr = Int(sumCr / nCal)
-                    cbMin = mCb - 14; cbMax = mCb + 14
-                    crMin = mCr - 16; crMax = mCr + 16
+                    cbMin = mCb - 16; cbMax = mCb + 16
+                    crMin = mCr - 18; crMax = mCr + 18
                     calibDone = (cbMin, cbMax, crMin, crMax)
                 }
                 calibrating = false
@@ -124,10 +126,32 @@ final class HandTracker {
         lock.unlock()
         if let d = calibDone { onCalibrated?(d.0, d.1, d.2, d.3) }
 
+        // Limpieza de ruido: quitar celdas sueltas
+        var clean = [UInt8](repeating: 0, count: gw * gh)
+        if gw > 2 && gh > 2 {
+            for y in 1..<(gh - 1) {
+                for x in 1..<(gw - 1) {
+                    let i = y * gw + x
+                    if mask[i] == 0 { continue }
+                    var c = 0
+                    c += Int(mask[i - 1]) + Int(mask[i + 1])
+                    c += Int(mask[i - gw]) + Int(mask[i + gw])
+                    c += Int(mask[i - gw - 1]) + Int(mask[i - gw + 1])
+                    c += Int(mask[i + gw - 1]) + Int(mask[i + gw + 1])
+                    if c >= 4 { clean[i] = 1 }
+                }
+            }
+        }
+        mask = clean
+
         // Componente conectado más grande
         let n = gw * gh
         var visited = [Bool](repeating: false, count: n)
         var best: [Int] = []
+        var bestScore = -1
+        var maxAny = 0
+        let minArea = 20
+        let maxArea = (n * 35) / 100
         var stack: [Int] = []
         for start in 0..<n where mask[start] == 1 && !visited[start] {
             var comp: [Int] = []
@@ -143,17 +167,28 @@ final class HandTracker {
                 if y > 0 { let nb = cur - gw; if mask[nb] == 1 && !visited[nb] { visited[nb] = true; stack.append(nb) } }
                 if y < gh - 1 { let nb = cur + gw; if mask[nb] == 1 && !visited[nb] { visited[nb] = true; stack.append(nb) } }
             }
-            if comp.count > best.count { best = comp }
+            if comp.count > maxAny { maxAny = comp.count }
+            if comp.count >= minArea && comp.count <= maxArea {
+                // El brazo entra desde abajo: damos prioridad a lo que toca el borde inferior
+                var touchesBottom = false
+                for i in comp where i / gw >= gh - 2 { touchesBottom = true; break }
+                let score = comp.count + (touchesBottom ? 400 : 0)
+                if score > bestScore { bestScore = score; best = comp }
+            }
         }
 
         var result = HandResult()
         result.imgW = w
         result.imgH = h
-        result.area = best.count
+        result.area = best.isEmpty ? maxAny : best.count
+        if sN > 0 {
+            result.centerCb = Int(sCb / sN)
+            result.centerCr = Int(sCr / sN)
+        }
         if wantsMask { result.maskImage = makeMaskImage(mask) }
 
         // Ni muy chico (ruido) ni enorme (pared / fondo del color de la piel)
-        if best.count >= 30 && best.count <= n / 2 {
+        if best.count >= minArea {
             var sx = 0, sy = 0
             for i in best { sx += i % gw; sy += i / gw }
             let mx = Double(sx) / Double(best.count)

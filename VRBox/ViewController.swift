@@ -36,6 +36,9 @@ class ViewController: UIViewController, AVCaptureVideoDataOutputSampleBufferDele
     private var smoothTip: CGPoint? = nil
     private var palmPoint: CGPoint? = nil
     private var lastMask: CGImage? = nil
+    private var lastArea = 0
+    private var lastCb = 0
+    private var lastCr = 0
 
     // MARK: Escena 3D
     private let scene = SCNScene()
@@ -271,6 +274,9 @@ class ViewController: UIViewController, AVCaptureVideoDataOutputSampleBufferDele
     // MARK: Manos
     private func handleHand(_ r: HandResult) {
         lastMask = r.maskImage
+        lastArea = r.area
+        lastCb = r.centerCb
+        lastCr = r.centerCr
         let size = CGSize(width: r.imgW, height: r.imgH)
         leftOverlay.imgSize = size
         rightOverlay.imgSize = size
@@ -391,6 +397,8 @@ class ViewController: UIViewController, AVCaptureVideoDataOutputSampleBufferDele
             hint = "Mirá a donde querés la pantalla y elegí FIJAR"
         } else if now < hintUntil {
             hint = hintText
+        } else if showDetection {
+            hint = "Mano: " + (finger ? "SÍ" : "NO") + " · celdas \(lastArea) · centro Cb/Cr \(lastCb)/\(lastCr)"
         }
         let calibRect: CGRect? = calibRemaining > 0 ? HandTracker.calibRect : nil
 
@@ -630,9 +638,10 @@ class ViewController: UIViewController, AVCaptureVideoDataOutputSampleBufferDele
         ]
         switch screen {
         case .menu:
-            b.append(Btn(id: "app.browser", title: "Navegador", rect: CGRect(x: 240, y: 200, width: 800, height: 100)))
-            b.append(Btn(id: "app.gallery", title: "Galería", rect: CGRect(x: 240, y: 320, width: 800, height: 100)))
-            b.append(Btn(id: "app.settings", title: "Ajustes", rect: CGRect(x: 240, y: 440, width: 800, height: 100)))
+            b.append(Btn(id: "app.browser", title: "Navegador", rect: CGRect(x: 240, y: 190, width: 800, height: 90)))
+            b.append(Btn(id: "app.gallery", title: "Galería", rect: CGRect(x: 240, y: 290, width: 800, height: 90)))
+            b.append(Btn(id: "app.settings", title: "Ajustes", rect: CGRect(x: 240, y: 390, width: 800, height: 90)))
+            b.append(Btn(id: "s.calib", title: "Calibrar mano", rect: CGRect(x: 240, y: 490, width: 800, height: 90)))
         case .browser:
             b.append(Btn(id: "web.back", title: "←", rect: CGRect(x: 20, y: 98, width: 90, height: 66), dwell: 0.8))
             b.append(Btn(id: "web.addr", title: "", rect: CGRect(x: 120, y: 98, width: 740, height: 66)))
@@ -722,7 +731,6 @@ class ViewController: UIViewController, AVCaptureVideoDataOutputSampleBufferDele
         let size = CGSize(width: texW, height: texH)
         let format = UIGraphicsImageRendererFormat()
         format.scale = 1
-        format.opaque = true
         let renderer = UIGraphicsImageRenderer(size: size, format: format)
         let gray = UIColor(white: 0.62, alpha: 1)
         return renderer.image { ctx in
@@ -742,8 +750,8 @@ class ViewController: UIViewController, AVCaptureVideoDataOutputSampleBufferDele
                 switch self.screen {
                 case .menu:
                     self.drawText("VRBox", in: CGRect(x: 0, y: 100, width: 1280, height: 90), size: 72, bold: true)
-                    self.drawText("Apuntá con el dedo (o mirá) 1 segundo para elegir", in: CGRect(x: 0, y: 580, width: 1280, height: 60), size: 34, color: gray)
-                    self.drawText("Primero: Ajustes › Calibrar color de piel", in: CGRect(x: 0, y: 635, width: 1280, height: 60), size: 30, color: gray)
+                    self.drawText("Apuntá con el dedo (o mirá) 1 segundo para elegir", in: CGRect(x: 0, y: 600, width: 1280, height: 50), size: 32, color: gray)
+                    self.drawText("Primero: Calibrar mano (tapá el cuadro amarillo con tu mano)", in: CGRect(x: 0, y: 650, width: 1280, height: 50), size: 28, color: gray)
                 case .browser:
                     if let img = self.webImage {
                         img.draw(in: CGRect(x: 0, y: 172, width: 1280, height: 548))
@@ -823,7 +831,6 @@ class ViewController: UIViewController, AVCaptureVideoDataOutputSampleBufferDele
         let size = CGSize(width: texW, height: kbTexH)
         let format = UIGraphicsImageRendererFormat()
         format.scale = 1
-        format.opaque = true
         let renderer = UIGraphicsImageRenderer(size: size, format: format)
         return renderer.image { ctx in
             UIColor(white: 0.05, alpha: 1).setFill()
