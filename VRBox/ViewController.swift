@@ -11,6 +11,7 @@ class ViewController: UIViewController, AVCaptureVideoDataOutputSampleBufferDele
 
     // MARK: Tipos
     private enum Screen { case menu, browser, gallery, photo, settings }
+    private enum HandStyle { case silhouette, skeleton, debug }
 
     private struct Btn {
         let id: String
@@ -36,6 +37,7 @@ class ViewController: UIViewController, AVCaptureVideoDataOutputSampleBufferDele
     private var smoothTip: CGPoint? = nil
     private var palmPoint: CGPoint? = nil
     private var lastMask: CGImage? = nil
+    private var lastSil: CGImage? = nil
     private var lastArea = 0
     private var lastCb = 0
     private var lastCr = 0
@@ -74,8 +76,7 @@ class ViewController: UIViewController, AVCaptureVideoDataOutputSampleBufferDele
     private var moving = false
     private var isTyping = false
     private var clickMode = false
-    private var showDetection = true
-    private var showSkeleton = true
+    private var handStyle: HandStyle = .silhouette
     private var gazeEnabled = true
     private var windowButtons: [Btn] = []
     private var keyboardButtons: [Btn] = []
@@ -281,6 +282,7 @@ class ViewController: UIViewController, AVCaptureVideoDataOutputSampleBufferDele
         leftOverlay.imgSize = size
         rightOverlay.imgSize = size
         if r.found {
+            lastSil = r.silhouetteImage
             missCount = 0
             handVisible = true
             palmPoint = r.palm
@@ -293,6 +295,7 @@ class ViewController: UIViewController, AVCaptureVideoDataOutputSampleBufferDele
             missCount += 1
             if missCount > 6 {
                 handVisible = false
+                lastSil = nil
                 smoothTip = nil
                 palmPoint = nil
             }
@@ -397,20 +400,20 @@ class ViewController: UIViewController, AVCaptureVideoDataOutputSampleBufferDele
             hint = "Mirá a donde querés la pantalla y elegí FIJAR"
         } else if now < hintUntil {
             hint = hintText
-        } else if showDetection {
+        } else if handStyle == .debug {
             hint = "Mano: " + (finger ? "SÍ" : "NO") + " · celdas \(lastArea) · centro Cb/Cr \(lastCb)/\(lastCr)"
         }
         let calibRect: CGRect? = calibRemaining > 0 ? HandTracker.calibRect : nil
 
-        leftOverlay.update(maskImage: lastMask, showMask: showDetection,
+        leftOverlay.update(maskImage: lastMask, showMask: handStyle == .debug, silhouette: lastSil, showSilhouette: handStyle == .silhouette,
                            palm: finger ? palmPoint : nil, tip: finger ? smoothTip : nil,
-                           showSkeleton: showSkeleton,
+                           showSkeleton: handStyle != .silhouette,
                            cursor: cursorPoint(leftOverlay, finger: finger),
                            progress: progress, hovering: hoverID != nil,
                            hint: hint, calibRect: calibRect)
-        rightOverlay.update(maskImage: lastMask, showMask: showDetection,
+        rightOverlay.update(maskImage: lastMask, showMask: handStyle == .debug, silhouette: lastSil, showSilhouette: handStyle == .silhouette,
                             palm: finger ? palmPoint : nil, tip: finger ? smoothTip : nil,
-                            showSkeleton: showSkeleton,
+                            showSkeleton: handStyle != .silhouette,
                             cursor: cursorPoint(rightOverlay, finger: finger),
                             progress: progress, hovering: hoverID != nil,
                             hint: hint, calibRect: calibRect)
@@ -446,8 +449,7 @@ class ViewController: UIViewController, AVCaptureVideoDataOutputSampleBufferDele
         case "p.back": screen = .gallery
         case "p.prev": photoIndex = max(0, photoIndex - 1); loadFull()
         case "p.next": photoIndex = min(max(0, assets.count - 1), photoIndex + 1); loadFull()
-        case "s.detect": showDetection.toggle()
-        case "s.skel": showSkeleton.toggle()
+        case "s.style": cycleHandStyle()
         case "s.gaze": gazeEnabled.toggle()
         case "s.calib": tracker.beginCalibration(duration: 4.0)
         case "s.center": needsRecenter = true
@@ -463,6 +465,22 @@ class ViewController: UIViewController, AVCaptureVideoDataOutputSampleBufferDele
         }
         refreshWindow()
         refreshKeyboard()
+    }
+
+    private func handStyleName() -> String {
+        switch handStyle {
+        case .silhouette: return "Silueta oscura"
+        case .skeleton: return "Esqueleto"
+        case .debug: return "Detección (datos)"
+        }
+    }
+
+    private func cycleHandStyle() {
+        switch handStyle {
+        case .silhouette: handStyle = .skeleton
+        case .skeleton: handStyle = .debug
+        case .debug: handStyle = .silhouette
+        }
     }
 
     private func goHome() {
@@ -666,8 +684,7 @@ class ViewController: UIViewController, AVCaptureVideoDataOutputSampleBufferDele
             b.append(Btn(id: "p.next", title: "▶", rect: CGRect(x: 840, y: 640, width: 200, height: 70), dwell: 0.8))
         case .settings:
             let items: [(String, String)] = [
-                ("s.detect", "Ver detección de mano: " + (showDetection ? "SÍ" : "NO")),
-                ("s.skel", "Esqueleto: " + (showSkeleton ? "SÍ" : "NO")),
+                ("s.style", "Mano: " + handStyleName()),
                 ("s.gaze", "Selección con la mirada: " + (gazeEnabled ? "SÍ" : "NO")),
                 ("s.calib", "Calibrar color de piel"),
                 ("s.center", "Recentrar vista"),

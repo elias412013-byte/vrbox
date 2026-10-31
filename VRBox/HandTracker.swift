@@ -13,6 +13,7 @@ struct HandResult {
     var maskImage: CGImage? = nil
     var centerCb = 0
     var centerCr = 0
+    var silhouetteImage: CGImage? = nil
 }
 
 /// Detección de mano por color de piel (YCbCr) sobre una grilla pequeña.
@@ -185,7 +186,7 @@ final class HandTracker {
             result.centerCb = Int(sCb / sN)
             result.centerCr = Int(sCr / sN)
         }
-        if wantsMask { result.maskImage = makeMaskImage(mask) }
+        if wantsMask { result.maskImage = makeImage(mask, r: 0, g: 255, b: 120, a: 255) }
 
         // Ni muy chico (ruido) ni enorme (pared / fondo del color de la piel)
         if best.count >= minArea {
@@ -204,6 +205,17 @@ final class HandTracker {
                     if d > bestD { bestD = d; tx = x; ty = y }
                 }
             }
+            var sil = [UInt8](repeating: 0, count: n)
+            for i in best {
+                let x = i % gw, y = i / gw
+                for dy in -1...1 {
+                    for dx in -1...1 {
+                        let nx = x + dx, ny = y + dy
+                        if nx >= 0 && nx < gw && ny >= 0 && ny < gh { sil[ny * gw + nx] = 1 }
+                    }
+                }
+            }
+            result.silhouetteImage = makeImage(sil, r: 17, g: 20, b: 30, a: 215)
             result.found = true
             result.tip = CGPoint(x: (tx + 0.5) / Double(gw), y: (ty + 0.5) / Double(gh))
             result.palm = CGPoint(x: (mx + 0.5) / Double(gw), y: (my + 0.5) / Double(gh))
@@ -211,13 +223,14 @@ final class HandTracker {
         return result
     }
 
-    private func makeMaskImage(_ mask: [UInt8]) -> CGImage? {
+    private func makeImage(_ mask: [UInt8], r: UInt8, g: UInt8, b: UInt8, a: UInt8) -> CGImage? {
         let w = HandTracker.gw, h = HandTracker.gh
         var rgba = [UInt8](repeating: 0, count: w * h * 4)
         for i in 0..<(w * h) where mask[i] == 1 {
-            rgba[i * 4 + 1] = 255
-            rgba[i * 4 + 2] = 120
-            rgba[i * 4 + 3] = 255
+            rgba[i * 4] = r
+            rgba[i * 4 + 1] = g
+            rgba[i * 4 + 2] = b
+            rgba[i * 4 + 3] = a
         }
         guard let provider = CGDataProvider(data: Data(rgba) as CFData) else { return nil }
         return CGImage(width: w, height: h, bitsPerComponent: 8, bitsPerPixel: 32, bytesPerRow: w * 4,

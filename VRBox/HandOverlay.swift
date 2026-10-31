@@ -7,6 +7,7 @@ final class HandOverlay {
     var imgSize = CGSize(width: 1280, height: 720)
 
     private let maskLayer = CALayer()
+    private let silLayer = CALayer()
     private let skeleton = CAShapeLayer()
     private let joints = CAShapeLayer()
     private let calibBox = CAShapeLayer()
@@ -21,6 +22,10 @@ final class HandOverlay {
         maskLayer.opacity = 0.4
         maskLayer.magnificationFilter = .nearest
         root.addSublayer(maskLayer)
+
+        silLayer.opacity = 0.92
+        silLayer.magnificationFilter = .linear
+        root.addSublayer(silLayer)
 
         skeleton.fillColor = nil
         skeleton.strokeColor = UIColor(red: 0, green: 0.85, blue: 1, alpha: 1).cgColor
@@ -79,6 +84,7 @@ final class HandOverlay {
     }
 
     func update(maskImage: CGImage?, showMask: Bool,
+                silhouette: CGImage?, showSilhouette: Bool,
                 palm: CGPoint?, tip: CGPoint?, showSkeleton: Bool,
                 cursor: CGPoint, progress: CGFloat, hovering: Bool,
                 hint: String?, calibRect: CGRect?) {
@@ -92,6 +98,15 @@ final class HandOverlay {
             maskLayer.isHidden = false
         } else {
             maskLayer.isHidden = true
+        }
+
+        if showSilhouette, let img = silhouette {
+            let a = mapPoint(.zero), b = mapPoint(CGPoint(x: 1, y: 1))
+            silLayer.frame = CGRect(x: a.x, y: a.y, width: b.x - a.x, height: b.y - a.y)
+            silLayer.contents = img
+            silLayer.isHidden = false
+        } else {
+            silLayer.isHidden = true
         }
 
         if showSkeleton, let p = palm, let t = tip {
