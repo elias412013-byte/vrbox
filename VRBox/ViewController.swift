@@ -12,8 +12,6 @@ class ViewController: UIViewController, AVCaptureVideoDataOutputSampleBufferDele
 
     // MARK: Tipos
     private enum Screen { case menu, browser, gallery, photo, settings, mapping }
-    private enum HandStyle { case silhouette, skeleton, debug }
-    private enum TrackMode { case marker, hand }
     private enum InputMode { case dwell, click }
 
     private struct Btn {
@@ -25,25 +23,15 @@ class ViewController: UIViewController, AVCaptureVideoDataOutputSampleBufferDele
         var drawn = true
     }
 
-    // MARK: Cámara y manos
+    // MARK: Cámara
     private let session = AVCaptureSession()
     private let output = AVCaptureVideoDataOutput()
     private let leftLayer = AVSampleBufferDisplayLayer()
     private let rightLayer = AVSampleBufferDisplayLayer()
     private let sessionQueue = DispatchQueue(label: "camera.session")
     private let frameQueue = DispatchQueue(label: "camera.frames")
-    private let tracker = HandTracker()
-    private let leftOverlay = HandOverlay()
-    private let rightOverlay = HandOverlay()
-    private var handVisible = false
-    private var missCount = 0
-    private var smoothTip: CGPoint? = nil
-    private var palmPoint: CGPoint? = nil
-    private var lastMask: CGImage? = nil
-    private var lastSil: CGImage? = nil
-    private var lastArea = 0
-    private var lastCb = 0
-    private var lastCr = 0
+    private let leftOverlay = ReticleOverlay()
+    private let rightOverlay = ReticleOverlay()
 
     // MARK: Escena 3D
     private let scene = SCNScene()
@@ -79,12 +67,11 @@ class ViewController: UIViewController, AVCaptureVideoDataOutputSampleBufferDele
     private var moving = false
     private var isTyping = false
     private var clickMode = false
-    private var handStyle: HandStyle = .silhouette
-    private var trackMode: TrackMode = .marker
     private var inputMode: InputMode = .dwell
     private var lastPx = CGPoint.zero
     private var controllerName: String? = nil
     private var listeningIndex: Int? = nil
+    private var udpSeen = false
     private static let defaultMapping: [String: String] = [
         "click": "A", "home": "B", "center": "X", "move": "Y",
         "shrink": "LB", "grow": "RB", "up": "↑", "down": "↓"
@@ -94,7 +81,6 @@ class ViewController: UIViewController, AVCaptureVideoDataOutputSampleBufferDele
         ("click", "Clic"), ("home", "Inicio"), ("center", "Recentrar vista"), ("move", "Mover / Fijar"),
         ("shrink", "Achicar pantalla"), ("grow", "Agrandar pantalla"), ("up", "Scroll arriba"), ("down", "Scroll abajo")
     ]
-    private var gazeEnabled = true
     private var windowButtons: [Btn] = []
     private var keyboardButtons: [Btn] = []
     private var hoverID: String? = nil
@@ -161,19 +147,6 @@ class ViewController: UIViewController, AVCaptureVideoDataOutputSampleBufferDele
         if let saved = UserDefaults.standard.dictionary(forKey: "padMapping") as? [String: String] {
             for (k, v) in saved { mapping[k] = v }
         }
-        tracker.markerMode = (trackMode == .marker)
-        loadCalibration()
-        tracker.onCalibrationFailed = { [weak self] in
-            DispatchQueue.main.async {
-                self?.flashHint("No vi un color vivo. Acercá el marcador al cuadro y probá otra vez", 3.5)
-            }
-        }
-        tracker.onCalibrated = { [weak self] isMarker, a, b, c, d in
-            DispatchQueue.main.async {
-                self?.saveCalibration(isMarker, a, b, c, d)
-                self?.flashHint("Calibración lista ✓", 2.5)
-            }
-        }
 
         refreshWindow()
         view.addGestureRecognizer(UITapGestureRecognizer(target: self, action: #selector(screenTapped)))
@@ -181,6 +154,7 @@ class ViewController: UIViewController, AVCaptureVideoDataOutputSampleBufferDele
         lp.minimumPressDuration = 1.0
         view.addGestureRecognizer(lp)
         setupControllers()
+        startUDPListener()
 
         switch AVCaptureDevice.authorizationStatus(for: .video) {
         case .authorized:
@@ -302,63 +276,13 @@ class ViewController: UIViewController, AVCaptureVideoDataOutputSampleBufferDele
         }
     }
 
-    // MARK: Manos
-    private func handleHand(_ r: HandResult) {
-        lastMask = r.maskImage
-        lastArea = r.area
-        lastCb = r.centerCb
-        lastCr = r.centerCr
-        let size = CGSize(width: r.imgW, height: r.imgH)
-        leftOverlay.imgSize = size
-        rightOverlay.imgSize = size
-        if r.found {
-            lastSil = r.silhouetteImage
-            missCount = 0
-            handVisible = true
-            palmPoint = r.palm
-            if let s = smoothTip {
-                smoothTip = CGPoint(x: s.x + (r.tip.x - s.x) * 0.45, y: s.y + (r.tip.y - s.y) * 0.45)
-            } else {
-                smoothTip = r.tip
-            }
-        } else {
-            missCount += 1
-            if missCount > 6 {
-                handVisible = false
-                lastSil = nil
-                smoothTip = nil
-                palmPoint = nil
-            }
-        }
-    }
-
-    private func loadCalibration() {
-        let d = UserDefaults.standard
-        if d.object(forKey: "cbMin") != nil {
-            tracker.setRange(marker: false, cbMin: d.integer(forKey: "cbMin"), cbMax: d.integer(forKey: "cbMax"),
-                             crMin: d.integer(forKey: "crMin"), crMax: d.integer(forKey: "crMax"))
-        }
-        if d.object(forKey: "m_cbMin") != nil {
-            tracker.setRange(marker: true, cbMin: d.integer(forKey: "m_cbMin"), cbMax: d.integer(forKey: "m_cbMax"),
-                             crMin: d.integer(forKey: "m_crMin"), crMax: d.integer(forKey: "m_crMax"))
-        }
-    }
-
-    private func saveCalibration(_ isMarker: Bool, _ a: Int, _ b: Int, _ c: Int, _ d: Int) {
-        let u = UserDefaults.standard
-        let p = isMarker ? "m_" : ""
-        u.set(a, forKey: p + "cbMin"); u.set(b, forKey: p + "cbMax")
-        u.set(c, forKey: p + "crMin"); u.set(d, forKey: p + "crMax")
-    }
-
     private func flashHint(_ text: String, _ seconds: CFTimeInterval) {
         hintText = text
         hintUntil = CACurrentMediaTime() + seconds
     }
 
     // MARK: Bucle principal (30 fps)
-    private func cursorPoint(_ ov: HandOverlay, finger: Bool) -> CGPoint {
-        if finger, let t = smoothTip { return ov.mapPoint(t) }
+    private func cursorPoint(_ ov: ReticleOverlay) -> CGPoint {
         return CGPoint(x: ov.root.bounds.midX, y: ov.root.bounds.midY)
     }
 
@@ -377,19 +301,13 @@ class ViewController: UIViewController, AVCaptureVideoDataOutputSampleBufferDele
         guard b.width > 10 else { return }
         let now = CACurrentMediaTime()
 
-        // 1) Puntero: dedo si hay mano, si no la mirada (centro de la vista)
-        // En modo clic el puntero es SIEMPRE el centro (la cabeza); el dedo/marcador no se usa
-        let tracking = (inputMode == .dwell)
-        let finger = tracking && handVisible && smoothTip != nil
-        var pt = CGPoint(x: b.midX, y: b.midY)
-        if finger, let t = smoothTip { pt = leftOverlay.mapPoint(t) }
-        let calibRemaining = tracker.calibrationRemaining
-        let pointerOK = (inputMode == .click || finger || gazeEnabled || moving) && calibRemaining <= 0
+        // 1) Puntero: el círculo del centro (donde apunta la cabeza)
+        let pt = CGPoint(x: b.midX, y: b.midY)
 
         // 2) ¿Qué hay debajo del puntero?
         var hitID: String? = nil
         var px = CGPoint.zero
-        if pointerOK {
+        do {
             for h in leftScn.hitTest(pt, options: nil) {
                 let lc = h.localCoordinates
                 if h.node === windowNode {
@@ -433,29 +351,16 @@ class ViewController: UIViewController, AVCaptureVideoDataOutputSampleBufferDele
 
         // 4) Avisos y overlays
         var hint: String? = nil
-        if calibRemaining > 0 {
-            hint = "Tapá el cuadro amarillo con " + (trackMode == .marker ? "la fibra o el marcador" : "tu mano") + " (\(Int(ceil(calibRemaining))))"
-        } else if moving {
+        if moving {
             hint = "Mirá a donde querés la pantalla y elegí FIJAR"
         } else if now < hintUntil {
             hint = hintText
-        } else if handStyle == .debug && tracking {
-            hint = (trackMode == .marker ? "Marcador: " : "Mano: ") + (finger ? "SÍ" : "NO") + " · celdas \(lastArea) · centro Cb/Cr \(lastCb)/\(lastCr)"
         }
-        let calibRect: CGRect? = calibRemaining > 0 ? tracker.calibRect(marker: trackMode == .marker) : nil
 
-        leftOverlay.update(maskImage: lastMask, showMask: handStyle == .debug && tracking, silhouette: lastSil, showSilhouette: handStyle == .silhouette && tracking,
-                           palm: finger ? palmPoint : nil, tip: finger ? smoothTip : nil,
-                           showSkeleton: handStyle != .silhouette && tracking,
-                           cursor: cursorPoint(leftOverlay, finger: finger),
-                           progress: progress, hovering: hoverID != nil,
-                           hint: hint, calibRect: calibRect)
-        rightOverlay.update(maskImage: lastMask, showMask: handStyle == .debug && tracking, silhouette: lastSil, showSilhouette: handStyle == .silhouette && tracking,
-                            palm: finger ? palmPoint : nil, tip: finger ? smoothTip : nil,
-                            showSkeleton: handStyle != .silhouette && tracking,
-                            cursor: cursorPoint(rightOverlay, finger: finger),
-                            progress: progress, hovering: hoverID != nil,
-                            hint: hint, calibRect: calibRect)
+        leftOverlay.update(cursor: cursorPoint(leftOverlay), progress: progress,
+                           hovering: hoverID != nil, hint: hint)
+        rightOverlay.update(cursor: cursorPoint(rightOverlay), progress: progress,
+                            hovering: hoverID != nil, hint: hint)
 
         // 5) Redibujar texturas si hizo falta (máx. ~12 veces por segundo)
         if (windowDirty || kbDirty) && now - lastRender > 0.08 {
@@ -495,10 +400,6 @@ class ViewController: UIViewController, AVCaptureVideoDataOutputSampleBufferDele
             saveMapping()
             listeningIndex = nil
         case "s.input": toggleInputMode()
-        case "s.mode": toggleTrackMode()
-        case "s.style": cycleHandStyle()
-        case "s.gaze": gazeEnabled.toggle()
-        case "s.calib": tracker.beginCalibration(duration: 4.0)
         case "s.center": needsRecenter = true
         case "s.reset": resetWindow()
         default:
@@ -532,7 +433,7 @@ class ViewController: UIViewController, AVCaptureVideoDataOutputSampleBufferDele
     }
 
     private func clickPressed() {
-        guard tracker.calibrationRemaining <= 0, let id = hoverID, findButton(id) != nil else { return }
+        guard let id = hoverID, findButton(id) != nil else { return }
         locked = true
         hoverStart = CACurrentMediaTime()
         perform(id, px: lastPx)
@@ -612,6 +513,49 @@ class ViewController: UIViewController, AVCaptureVideoDataOutputSampleBufferDele
         ]
     }
 
+    // MARK: Puente por red (control conectado a una PC)
+    private func startUDPListener() {
+        DispatchQueue.global(qos: .utility).async { [weak self] in
+            let fd = socket(AF_INET, SOCK_DGRAM, 0)
+            guard fd >= 0 else { return }
+            var yes: Int32 = 1
+            setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &yes, socklen_t(MemoryLayout<Int32>.size))
+            var addr = sockaddr_in()
+            addr.sin_len = UInt8(MemoryLayout<sockaddr_in>.size)
+            addr.sin_family = sa_family_t(AF_INET)
+            addr.sin_port = UInt16(5005).bigEndian
+            addr.sin_addr.s_addr = 0
+            let result = withUnsafePointer(to: &addr) { p -> Int32 in
+                return p.withMemoryRebound(to: sockaddr.self, capacity: 1) { sp -> Int32 in
+                    return bind(fd, sp, socklen_t(MemoryLayout<sockaddr_in>.size))
+                }
+            }
+            guard result == 0 else { close(fd); return }
+            var buf = [UInt8](repeating: 0, count: 256)
+            let cap = buf.count
+            while true {
+                let n = recv(fd, &buf, cap, 0)
+                if n <= 0 { usleep(20000); continue }
+                if let text = String(bytes: buf[0..<n], encoding: .utf8) {
+                    DispatchQueue.main.async { self?.udpMessage(text) }
+                }
+            }
+        }
+    }
+
+    private func udpMessage(_ raw: String) {
+        let name = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !name.isEmpty else { return }
+        if !udpSeen {
+            udpSeen = true
+            controllerName = "PC"
+            inputMode = .click
+            flashHint("Control por PC conectado · modo clic", 3.5)
+            windowDirty = true
+        }
+        padPressed(name)
+    }
+
     private func mapName(_ key: String) -> String {
         return mapping[key] ?? "—"
     }
@@ -649,32 +593,6 @@ class ViewController: UIViewController, AVCaptureVideoDataOutputSampleBufferDele
         case "up": pressVirtual("web.up")
         case "down": pressVirtual("web.down")
         default: break
-        }
-    }
-
-    private func toggleTrackMode() {
-        trackMode = (trackMode == .marker) ? .hand : .marker
-        tracker.markerMode = (trackMode == .marker)
-        handVisible = false
-        smoothTip = nil
-        palmPoint = nil
-        lastSil = nil
-        missCount = 0
-    }
-
-    private func handStyleName() -> String {
-        switch handStyle {
-        case .silhouette: return "Silueta oscura"
-        case .skeleton: return "Esqueleto"
-        case .debug: return "Detección (datos)"
-        }
-    }
-
-    private func cycleHandStyle() {
-        switch handStyle {
-        case .silhouette: handStyle = .skeleton
-        case .skeleton: handStyle = .debug
-        case .debug: handStyle = .silhouette
         }
     }
 
@@ -852,10 +770,9 @@ class ViewController: UIViewController, AVCaptureVideoDataOutputSampleBufferDele
         ]
         switch screen {
         case .menu:
-            b.append(Btn(id: "app.browser", title: "Navegador", rect: CGRect(x: 240, y: 190, width: 800, height: 90)))
-            b.append(Btn(id: "app.gallery", title: "Galería", rect: CGRect(x: 240, y: 290, width: 800, height: 90)))
-            b.append(Btn(id: "app.settings", title: "Ajustes", rect: CGRect(x: 240, y: 390, width: 800, height: 90)))
-            b.append(Btn(id: "s.calib", title: "Calibrar " + (trackMode == .marker ? "marcador" : "mano"), rect: CGRect(x: 240, y: 490, width: 800, height: 90)))
+            b.append(Btn(id: "app.browser", title: "Navegador", rect: CGRect(x: 240, y: 200, width: 800, height: 100)))
+            b.append(Btn(id: "app.gallery", title: "Galería", rect: CGRect(x: 240, y: 320, width: 800, height: 100)))
+            b.append(Btn(id: "app.settings", title: "Ajustes", rect: CGRect(x: 240, y: 440, width: 800, height: 100)))
         case .browser:
             b.append(Btn(id: "web.back", title: "←", rect: CGRect(x: 20, y: 98, width: 90, height: 66), dwell: 0.8))
             b.append(Btn(id: "web.addr", title: "", rect: CGRect(x: 120, y: 98, width: 740, height: 66)))
@@ -889,16 +806,12 @@ class ViewController: UIViewController, AVCaptureVideoDataOutputSampleBufferDele
         case .settings:
             let items: [(String, String)] = [
                 ("s.input", "Selección: " + (inputMode == .click ? "Mirada + clic" : "Espera")),
-                ("s.mode", "Seguimiento: " + (trackMode == .marker ? "Marcador de color" : "Mano (piel)")),
-                ("s.style", "Vista de la mano: " + handStyleName()),
-                ("s.gaze", "Selección con la mirada: " + (gazeEnabled ? "SÍ" : "NO")),
-                ("s.calib", "Calibrar " + (trackMode == .marker ? "marcador" : "color de piel")),
                 ("s.center", "Recentrar vista"),
                 ("s.reset", "Restablecer pantalla"),
                 ("s.map", "Botones del control…")
             ]
             for (i, it) in items.enumerated() {
-                b.append(Btn(id: it.0, title: it.1, rect: CGRect(x: 240, y: 96 + CGFloat(i) * 64, width: 800, height: 56)))
+                b.append(Btn(id: it.0, title: it.1, rect: CGRect(x: 240, y: 110 + CGFloat(i) * 100, width: 800, height: 84)))
             }
         }
         return b
@@ -978,7 +891,7 @@ class ViewController: UIViewController, AVCaptureVideoDataOutputSampleBufferDele
                     if self.inputMode == .click {
                         self.drawText("Apuntá con la cabeza y hacé clic (botón del control o el botón del visor)", in: CGRect(x: 0, y: 600, width: 1280, height: 50), size: 32, color: gray)
                     } else {
-                        self.drawText("Apuntá con el dedo (o mirá) 1 segundo para elegir", in: CGRect(x: 0, y: 600, width: 1280, height: 50), size: 32, color: gray)
+                        self.drawText("Mirá un botón 1 segundo para elegirlo (o tocá el botón del visor)", in: CGRect(x: 0, y: 600, width: 1280, height: 50), size: 32, color: gray)
                     }
                     if self.inputMode == .click {
                         let mc = self.mapName("click"), mh = self.mapName("home"), mr = self.mapName("center")
@@ -986,7 +899,7 @@ class ViewController: UIViewController, AVCaptureVideoDataOutputSampleBufferDele
                         let line = "\(mc) clic · \(mh) inicio · \(mr) recentrar · \(mm) mover · \(ms)/\(mg) tamaño"
                         self.drawText(line, in: CGRect(x: 0, y: 650, width: 1280, height: 50), size: 26, color: gray)
                     } else {
-                        self.drawText("Primero: Calibrar (tapá el cuadro amarillo con " + (self.trackMode == .marker ? "la fibra o el marcador)" : "tu mano)"), in: CGRect(x: 0, y: 650, width: 1280, height: 50), size: 28, color: gray)
+                        self.drawText("Control: Ajustes › Botones del control", in: CGRect(x: 0, y: 650, width: 1280, height: 50), size: 28, color: gray)
                     }
                 case .browser:
                     if let img = self.webImage {
@@ -1007,7 +920,8 @@ class ViewController: UIViewController, AVCaptureVideoDataOutputSampleBufferDele
                 case .settings:
                     let pads = GCController.controllers()
                     let info = pads.isEmpty ? "Controles detectados por la app: 0" : "Controles detectados por la app: \(pads.count) (" + (pads[0].vendorName ?? "sin nombre") + ")"
-                    self.drawText(info, in: CGRect(x: 0, y: 650, width: 1280, height: 50), size: 28, color: gray)
+                    self.drawText(info, in: CGRect(x: 0, y: 645, width: 1280, height: 36), size: 26, color: gray)
+                    self.drawText("Puente PC (puerto 5005): " + (self.udpSeen ? "recibiendo ✓" : "sin señal"), in: CGRect(x: 0, y: 680, width: 1280, height: 32), size: 24, color: gray)
                 }
             }
 
@@ -1158,9 +1072,6 @@ class ViewController: UIViewController, AVCaptureVideoDataOutputSampleBufferDele
         for l in [leftLayer, rightLayer] {
             if l.status == .failed { l.flush() }
             l.enqueue(sampleBuffer)
-        }
-        if let pb = CMSampleBufferGetImageBuffer(sampleBuffer), let res = tracker.process(pb) {
-            DispatchQueue.main.async { self.handleHand(res) }
         }
     }
 
