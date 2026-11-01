@@ -11,7 +11,7 @@ import GameController
 class ViewController: UIViewController, AVCaptureVideoDataOutputSampleBufferDelegate, WKNavigationDelegate {
 
     // MARK: Tipos
-    private enum Screen { case menu, browser, gallery, photo, settings }
+    private enum Screen { case menu, browser, gallery, photo, settings, mapping }
     private enum HandStyle { case silhouette, skeleton, debug }
     private enum TrackMode { case marker, hand }
     private enum InputMode { case dwell, click }
@@ -84,6 +84,16 @@ class ViewController: UIViewController, AVCaptureVideoDataOutputSampleBufferDele
     private var inputMode: InputMode = .dwell
     private var lastPx = CGPoint.zero
     private var controllerName: String? = nil
+    private var listeningIndex: Int? = nil
+    private static let defaultMapping: [String: String] = [
+        "click": "A", "home": "B", "center": "X", "move": "Y",
+        "shrink": "LB", "grow": "RB", "up": "↑", "down": "↓"
+    ]
+    private var mapping: [String: String] = ViewController.defaultMapping
+    private let actionList: [(key: String, label: String)] = [
+        ("click", "Clic"), ("home", "Inicio"), ("center", "Recentrar vista"), ("move", "Mover / Fijar"),
+        ("shrink", "Achicar pantalla"), ("grow", "Agrandar pantalla"), ("up", "Scroll arriba"), ("down", "Scroll abajo")
+    ]
     private var gazeEnabled = true
     private var windowButtons: [Btn] = []
     private var keyboardButtons: [Btn] = []
@@ -148,6 +158,9 @@ class ViewController: UIViewController, AVCaptureVideoDataOutputSampleBufferDele
         view.layer.addSublayer(leftOverlay.root)
         view.layer.addSublayer(rightOverlay.root)
 
+        if let saved = UserDefaults.standard.dictionary(forKey: "padMapping") as? [String: String] {
+            for (k, v) in saved { mapping[k] = v }
+        }
         tracker.markerMode = (trackMode == .marker)
         loadCalibration()
         tracker.onCalibrationFailed = { [weak self] in
@@ -475,6 +488,12 @@ class ViewController: UIViewController, AVCaptureVideoDataOutputSampleBufferDele
         case "p.back": screen = .gallery
         case "p.prev": photoIndex = max(0, photoIndex - 1); loadFull()
         case "p.next": photoIndex = min(max(0, assets.count - 1), photoIndex + 1); loadFull()
+        case "s.map": screen = .mapping; listeningIndex = nil
+        case "m.back": screen = .settings; listeningIndex = nil
+        case "m.reset":
+            mapping = ViewController.defaultMapping
+            saveMapping()
+            listeningIndex = nil
         case "s.input": toggleInputMode()
         case "s.mode": toggleTrackMode()
         case "s.style": cycleHandStyle()
@@ -487,6 +506,13 @@ class ViewController: UIViewController, AVCaptureVideoDataOutputSampleBufferDele
                 photoIndex = galleryPage * 8 + i
                 screen = .photo
                 loadFull()
+            } else if id.hasPrefix("m."), let i = Int(id.dropFirst(2)) {
+                if listeningIndex == i {
+                    listeningIndex = nil
+                } else {
+                    listeningIndex = i
+                    flashHint("Presioná el botón del control para: " + actionList[i].label, 4)
+                }
             } else if id.hasPrefix("k.") {
                 typeKey(id)
             }
@@ -548,42 +574,82 @@ class ViewController: UIViewController, AVCaptureVideoDataOutputSampleBufferDele
         inputMode = .click
         flashHint("Control conectado: " + (controllerName ?? "") + " · modo clic", 3.5)
         windowDirty = true
+        var list: [(String, GCControllerButtonInput)] = []
         if let p = c.extendedGamepad {
-            bindButtons(a: p.buttonA, b: p.buttonB, x: p.buttonX, y: p.buttonY,
-                        l: p.leftShoulder, r: p.rightShoulder, rt: p.rightTrigger,
-                        up: p.dpad.up, down: p.dpad.down)
+            list = extendedInputs(p)
         } else if let p = c.gamepad {
-            bindButtons(a: p.buttonA, b: p.buttonB, x: p.buttonX, y: p.buttonY,
-                        l: p.leftShoulder, r: p.rightShoulder, rt: nil,
-                        up: p.dpad.up, down: p.dpad.down)
+            list = basicInputs(p)
+        }
+        for (name, btn) in list {
+            btn.pressedChangedHandler = { [weak self] _, _, pressed in
+                if pressed { DispatchQueue.main.async { self?.padPressed(name) } }
+            }
         }
     }
 
-    private func bindButtons(a: GCControllerButtonInput, b: GCControllerButtonInput,
-                             x: GCControllerButtonInput, y: GCControllerButtonInput,
-                             l: GCControllerButtonInput, r: GCControllerButtonInput,
-                             rt: GCControllerButtonInput?,
-                             up: GCControllerButtonInput, down: GCControllerButtonInput) {
-        func on(_ btn: GCControllerButtonInput?, _ action: @escaping () -> Void) {
-            btn?.pressedChangedHandler = { _, _, pressed in
-                if pressed { DispatchQueue.main.async { action() } }
-            }
+    private func extendedInputs(_ p: GCExtendedGamepad) -> [(String, GCControllerButtonInput)] {
+        var l: [(String, GCControllerButtonInput)] = [
+            ("A", p.buttonA), ("B", p.buttonB), ("X", p.buttonX), ("Y", p.buttonY),
+            ("LB", p.leftShoulder), ("RB", p.rightShoulder), ("LT", p.leftTrigger), ("RT", p.rightTrigger),
+            ("↑", p.dpad.up), ("↓", p.dpad.down), ("←", p.dpad.left), ("→", p.dpad.right)
+        ]
+        if #available(iOS 12.1, *) {
+            if let t = p.leftThumbstickButton { l.append(("L3", t)) }
+            if let t = p.rightThumbstickButton { l.append(("R3", t)) }
         }
-        on(a) { [weak self] in self?.clickPressed() }
-        on(rt) { [weak self] in self?.clickPressed() }
-        on(b) { [weak self] in self?.pressVirtual("home") }
-        on(x) { [weak self] in
-            self?.needsRecenter = true
-            self?.flashHint("Vista recentrada", 1.5)
+        if #available(iOS 13.0, *) {
+            l.append(("Menú", p.buttonMenu))
+            if let o = p.buttonOptions { l.append(("Vista", o)) }
         }
-        on(y) { [weak self] in
-            guard let self = self else { return }
-            self.pressVirtual(self.moving ? "fix" : "move")
+        return l
+    }
+
+    private func basicInputs(_ p: GCGamepad) -> [(String, GCControllerButtonInput)] {
+        return [
+            ("A", p.buttonA), ("B", p.buttonB), ("X", p.buttonX), ("Y", p.buttonY),
+            ("LB", p.leftShoulder), ("RB", p.rightShoulder),
+            ("↑", p.dpad.up), ("↓", p.dpad.down), ("←", p.dpad.left), ("→", p.dpad.right)
+        ]
+    }
+
+    private func mapName(_ key: String) -> String {
+        return mapping[key] ?? "—"
+    }
+
+    private func saveMapping() {
+        UserDefaults.standard.set(mapping, forKey: "padMapping")
+    }
+
+    /// Se llama cada vez que se aprieta un botón del control
+    private func padPressed(_ name: String) {
+        if let idx = listeningIndex {
+            // Modo "asignar": el botón apretado queda asignado a la acción elegida
+            let key = actionList[idx].key
+            for (k, v) in mapping where v == name && k != key { mapping[k] = "—" }
+            mapping[key] = name
+            listeningIndex = nil
+            saveMapping()
+            flashHint(actionList[idx].label + " → " + name, 2.5)
+            windowDirty = true
+            return
         }
-        on(l) { [weak self] in self?.pressVirtual("shrink") }
-        on(r) { [weak self] in self?.pressVirtual("grow") }
-        on(up) { [weak self] in self?.pressVirtual("web.up") }
-        on(down) { [weak self] in self?.pressVirtual("web.down") }
+        for (key, v) in mapping where v == name { runPadAction(key) }
+    }
+
+    private func runPadAction(_ key: String) {
+        switch key {
+        case "click": clickPressed()
+        case "home": pressVirtual("home")
+        case "center":
+            needsRecenter = true
+            flashHint("Vista recentrada", 1.5)
+        case "move": pressVirtual(moving ? "fix" : "move")
+        case "shrink": pressVirtual("shrink")
+        case "grow": pressVirtual("grow")
+        case "up": pressVirtual("web.up")
+        case "down": pressVirtual("web.down")
+        default: break
+        }
     }
 
     private func toggleTrackMode() {
@@ -614,6 +680,7 @@ class ViewController: UIViewController, AVCaptureVideoDataOutputSampleBufferDele
 
     private func goHome() {
         screen = .menu
+        listeningIndex = nil
         isTyping = false
         moving = false
         stopSnapshots()
@@ -811,6 +878,14 @@ class ViewController: UIViewController, AVCaptureVideoDataOutputSampleBufferDele
             b.append(Btn(id: "p.prev", title: "◀", rect: CGRect(x: 240, y: 640, width: 200, height: 70), dwell: 0.8))
             b.append(Btn(id: "p.back", title: "Galería", rect: CGRect(x: 480, y: 640, width: 320, height: 70)))
             b.append(Btn(id: "p.next", title: "▶", rect: CGRect(x: 840, y: 640, width: 200, height: 70), dwell: 0.8))
+        case .mapping:
+            for (i, a) in actionList.enumerated() {
+                let value = (listeningIndex == i) ? "presioná un botón…" : mapName(a.key)
+                b.append(Btn(id: "m.\(i)", title: a.label + "  →  " + value,
+                             rect: CGRect(x: 240, y: 96 + CGFloat(i) * 64, width: 800, height: 56)))
+            }
+            b.append(Btn(id: "m.reset", title: "Restablecer", rect: CGRect(x: 240, y: 616, width: 390, height: 52)))
+            b.append(Btn(id: "m.back", title: "‹ Ajustes", rect: CGRect(x: 650, y: 616, width: 390, height: 52)))
         case .settings:
             let items: [(String, String)] = [
                 ("s.input", "Selección: " + (inputMode == .click ? "Mirada + clic" : "Espera")),
@@ -819,10 +894,11 @@ class ViewController: UIViewController, AVCaptureVideoDataOutputSampleBufferDele
                 ("s.gaze", "Selección con la mirada: " + (gazeEnabled ? "SÍ" : "NO")),
                 ("s.calib", "Calibrar " + (trackMode == .marker ? "marcador" : "color de piel")),
                 ("s.center", "Recentrar vista"),
-                ("s.reset", "Restablecer pantalla")
+                ("s.reset", "Restablecer pantalla"),
+                ("s.map", "Botones del control…")
             ]
             for (i, it) in items.enumerated() {
-                b.append(Btn(id: it.0, title: it.1, rect: CGRect(x: 240, y: 100 + CGFloat(i) * 78, width: 800, height: 70)))
+                b.append(Btn(id: it.0, title: it.1, rect: CGRect(x: 240, y: 96 + CGFloat(i) * 64, width: 800, height: 56)))
             }
         }
         return b
@@ -872,6 +948,7 @@ class ViewController: UIViewController, AVCaptureVideoDataOutputSampleBufferDele
         case .browser: return "Navegador"
         case .gallery, .photo: return "Galería"
         case .settings: return "Ajustes"
+        case .mapping: return "Botones"
         }
     }
 
@@ -899,12 +976,15 @@ class ViewController: UIViewController, AVCaptureVideoDataOutputSampleBufferDele
                 case .menu:
                     self.drawText("VRBox", in: CGRect(x: 0, y: 100, width: 1280, height: 90), size: 72, bold: true)
                     if self.inputMode == .click {
-                        self.drawText("Apuntá con la cabeza y hacé clic (botón A o el botón del visor)", in: CGRect(x: 0, y: 600, width: 1280, height: 50), size: 32, color: gray)
+                        self.drawText("Apuntá con la cabeza y hacé clic (botón del control o el botón del visor)", in: CGRect(x: 0, y: 600, width: 1280, height: 50), size: 32, color: gray)
                     } else {
                         self.drawText("Apuntá con el dedo (o mirá) 1 segundo para elegir", in: CGRect(x: 0, y: 600, width: 1280, height: 50), size: 32, color: gray)
                     }
                     if self.inputMode == .click {
-                        self.drawText("A clic · B inicio · X recentrar · Y mover · L1/R1 tamaño · cruceta scroll", in: CGRect(x: 0, y: 650, width: 1280, height: 50), size: 26, color: gray)
+                        let mc = self.mapName("click"), mh = self.mapName("home"), mr = self.mapName("center")
+                        let mm = self.mapName("move"), ms = self.mapName("shrink"), mg = self.mapName("grow")
+                        let line = "\(mc) clic · \(mh) inicio · \(mr) recentrar · \(mm) mover · \(ms)/\(mg) tamaño"
+                        self.drawText(line, in: CGRect(x: 0, y: 650, width: 1280, height: 50), size: 26, color: gray)
                     } else {
                         self.drawText("Primero: Calibrar (tapá el cuadro amarillo con " + (self.trackMode == .marker ? "la fibra o el marcador)" : "tu mano)"), in: CGRect(x: 0, y: 650, width: 1280, height: 50), size: 28, color: gray)
                     }
@@ -922,6 +1002,8 @@ class ViewController: UIViewController, AVCaptureVideoDataOutputSampleBufferDele
                     } else {
                         self.drawText("Cargando…", in: CGRect(x: 0, y: 340, width: 1280, height: 80), size: 48, color: gray)
                     }
+                case .mapping:
+                    self.drawText("Elegí una acción y después presioná el botón del control", in: CGRect(x: 0, y: 676, width: 1280, height: 36), size: 24, color: gray)
                 case .settings:
                     let pads = GCController.controllers()
                     let info = pads.isEmpty ? "Controles detectados por la app: 0" : "Controles detectados por la app: \(pads.count) (" + (pads[0].vendorName ?? "sin nombre") + ")"
@@ -934,6 +1016,7 @@ class ViewController: UIViewController, AVCaptureVideoDataOutputSampleBufferDele
                 let isAddr = b.id == "web.addr"
                 var fill = hot ? UIColor(white: 0.42, alpha: 1) : UIColor(white: 0.18, alpha: 1)
                 if isAddr { fill = hot ? UIColor(white: 0.25, alpha: 1) : UIColor(white: 0.10, alpha: 1) }
+                if let li = self.listeningIndex, b.id == "m.\(li)" { fill = UIColor(red: 0.10, green: 0.42, blue: 0.20, alpha: 1) }
                 fill.setFill()
                 let path = UIBezierPath(roundedRect: b.rect, cornerRadius: 20)
                 path.fill()
