@@ -32,7 +32,7 @@ final class ReticleOverlay {
         dot.fillColor = UIColor.white.cgColor
         root.addSublayer(dot)
 
-        hintLayer.fontSize = 13
+        hintLayer.fontSize = 15
         hintLayer.alignmentMode = .center
         hintLayer.isWrapped = true
         hintLayer.foregroundColor = UIColor.white.cgColor
@@ -55,7 +55,7 @@ final class ReticleOverlay {
         ringProgress.isHidden = progress <= 0.001
 
         if let h = hint {
-            hintLayer.frame = CGRect(x: 8, y: 8, width: max(10, root.bounds.width - 16), height: 40)
+            hintLayer.frame = CGRect(x: 8, y: 8, width: max(10, root.bounds.width - 16), height: 48)
             hintLayer.string = h
             hintLayer.isHidden = false
         } else {

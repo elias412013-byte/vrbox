@@ -11,7 +11,7 @@ import GameController
 class ViewController: UIViewController, AVCaptureVideoDataOutputSampleBufferDelegate, WKNavigationDelegate {
 
     // MARK: Tipos
-    private enum Screen { case menu, browser, gallery, photo, settings, mapping }
+    private enum Screen { case menu, browser, gallery, photo, settings, mapping, store }
     private enum InputMode { case dwell, click }
 
     private struct Btn {
@@ -92,6 +92,8 @@ class ViewController: UIViewController, AVCaptureVideoDataOutputSampleBufferDele
     private var hintText = ""
     private var hintUntil: CFTimeInterval = 0
     private var link: CADisplayLink?
+    private var game: SchoolGame? = nil
+    private var lastTickTime: CFTimeInterval = 0
 
     // MARK: Navegador
     private var webView: WKWebView?
@@ -261,6 +263,7 @@ class ViewController: UIViewController, AVCaptureVideoDataOutputSampleBufferDele
 
         let orient = yawFix * head
         headNode.simdOrientation = orient
+        game?.headOrient = orient
 
         if moving {
             // La pantalla sigue tu mirada hasta que elijas FIJAR
@@ -299,6 +302,16 @@ class ViewController: UIViewController, AVCaptureVideoDataOutputSampleBufferDele
     @objc private func tick() {
         let b = leftScn.bounds
         guard b.width > 10 else { return }
+        if let g = game, g.isActive {
+            let nowT = CACurrentMediaTime()
+            let dtG = min(0.05, max(0.001, nowT - lastTickTime))
+            lastTickTime = nowT
+            g.dwellEnabled = (inputMode == .dwell)
+            g.update(dt: dtG)
+            leftOverlay.update(cursor: cursorPoint(leftOverlay), progress: g.progress, hovering: g.hovering, hint: g.hintText)
+            rightOverlay.update(cursor: cursorPoint(rightOverlay), progress: g.progress, hovering: g.hovering, hint: g.hintText)
+            return
+        }
         let now = CACurrentMediaTime()
 
         // 1) Puntero: el círculo del centro (donde apunta la cabeza)
@@ -381,6 +394,8 @@ class ViewController: UIViewController, AVCaptureVideoDataOutputSampleBufferDele
         case "app.browser": screen = .browser; ensureWebView(); startSnapshots()
         case "app.gallery": screen = .gallery; galleryPage = 0
         case "app.settings": screen = .settings
+        case "app.store": screen = .store
+        case "game.school": startGame()
         case "web.back": if let w = webView, w.canGoBack { w.goBack() }
         case "web.addr": isTyping = true; addressBuffer = ""
         case "web.go": goToAddress()
@@ -423,7 +438,13 @@ class ViewController: UIViewController, AVCaptureVideoDataOutputSampleBufferDele
     }
 
     // MARK: Clic (pantalla / control)
-    @objc private func screenTapped() { clickPressed() }
+    @objc private func screenTapped() {
+        if let g = game, g.isActive {
+            g.padName("A")
+            return
+        }
+        clickPressed()
+    }
 
     @objc private func recenterLong(_ g: UILongPressGestureRecognizer) {
         if g.state == .began {
@@ -485,6 +506,10 @@ class ViewController: UIViewController, AVCaptureVideoDataOutputSampleBufferDele
             btn.pressedChangedHandler = { [weak self] _, _, pressed in
                 if pressed { DispatchQueue.main.async { self?.padPressed(name) } }
             }
+        }
+        if let p = c.extendedGamepad {
+            p.leftThumbstick.valueChangedHandler = { [weak self] _, x, y in self?.game?.stick(x: x, y: y) }
+            p.leftTrigger.valueChangedHandler = { [weak self] _, v, _ in self?.game?.run(v > 0.5) }
         }
     }
 
@@ -553,6 +578,14 @@ class ViewController: UIViewController, AVCaptureVideoDataOutputSampleBufferDele
             flashHint("Control por PC conectado · modo clic", 3.5)
             windowDirty = true
         }
+        if name.hasPrefix("ST,") {
+            let parts = name.dropFirst(3).split(separator: ",")
+            if parts.count >= 3, let lx = Float(parts[0]), let ly = Float(parts[1]), let lt = Float(parts[2]) {
+                game?.stick(x: lx, y: ly)
+                game?.run(lt > 0.5)
+            }
+            return
+        }
         padPressed(name)
     }
 
@@ -566,6 +599,10 @@ class ViewController: UIViewController, AVCaptureVideoDataOutputSampleBufferDele
 
     /// Se llama cada vez que se aprieta un botón del control
     private func padPressed(_ name: String) {
+        if let g = game, g.isActive {
+            g.padName(name)
+            return
+        }
         if let idx = listeningIndex {
             // Modo "asignar": el botón apretado queda asignado a la acción elegida
             let key = actionList[idx].key
@@ -594,6 +631,41 @@ class ViewController: UIViewController, AVCaptureVideoDataOutputSampleBufferDele
         case "down": pressVirtual("web.down")
         default: break
         }
+    }
+
+    // MARK: Juego 3D
+    private func startGame() {
+        if game == nil {
+            let g = SchoolGame(left: leftScn, right: rightScn)
+            g.onExit = { [weak self] in self?.exitGame() }
+            game = g
+        }
+        guard let g = game else { return }
+        stopSnapshots()
+        leftLayer.isHidden = true
+        rightLayer.isHidden = true
+        sessionQueue.async { self.session.stopRunning() }
+        link?.preferredFramesPerSecond = 60
+        needsRecenter = true
+        g.dwellEnabled = (inputMode == .dwell)
+        lastTickTime = CACurrentMediaTime()
+        g.start()
+    }
+
+    private func exitGame() {
+        game?.stop()
+        leftLayer.isHidden = false
+        rightLayer.isHidden = false
+        leftScn.scene = scene
+        rightScn.scene = scene
+        leftScn.pointOfView = leftCam
+        rightScn.pointOfView = rightCam
+        sessionQueue.async { self.session.startRunning() }
+        link?.preferredFramesPerSecond = 30
+        needsRecenter = true
+        screen = .menu
+        hoverID = nil
+        windowDirty = true
     }
 
     private func goHome() {
@@ -770,9 +842,12 @@ class ViewController: UIViewController, AVCaptureVideoDataOutputSampleBufferDele
         ]
         switch screen {
         case .menu:
-            b.append(Btn(id: "app.browser", title: "Navegador", rect: CGRect(x: 240, y: 200, width: 800, height: 100)))
-            b.append(Btn(id: "app.gallery", title: "Galería", rect: CGRect(x: 240, y: 320, width: 800, height: 100)))
-            b.append(Btn(id: "app.settings", title: "Ajustes", rect: CGRect(x: 240, y: 440, width: 800, height: 100)))
+            b.append(Btn(id: "app.browser", title: "Navegador", rect: CGRect(x: 240, y: 190, width: 800, height: 90)))
+            b.append(Btn(id: "app.gallery", title: "Galería", rect: CGRect(x: 240, y: 290, width: 800, height: 90)))
+            b.append(Btn(id: "app.store", title: "Tienda", rect: CGRect(x: 240, y: 390, width: 800, height: 90)))
+            b.append(Btn(id: "app.settings", title: "Ajustes", rect: CGRect(x: 240, y: 490, width: 800, height: 90)))
+        case .store:
+            b.append(Btn(id: "game.school", title: "La Escuela  (juego 3D)", rect: CGRect(x: 240, y: 200, width: 800, height: 100), dwell: 1.2))
         case .browser:
             b.append(Btn(id: "web.back", title: "←", rect: CGRect(x: 20, y: 98, width: 90, height: 66), dwell: 0.8))
             b.append(Btn(id: "web.addr", title: "", rect: CGRect(x: 120, y: 98, width: 740, height: 66)))
@@ -862,6 +937,7 @@ class ViewController: UIViewController, AVCaptureVideoDataOutputSampleBufferDele
         case .gallery, .photo: return "Galería"
         case .settings: return "Ajustes"
         case .mapping: return "Botones"
+        case .store: return "Tienda"
         }
     }
 
@@ -915,6 +991,11 @@ class ViewController: UIViewController, AVCaptureVideoDataOutputSampleBufferDele
                     } else {
                         self.drawText("Cargando…", in: CGRect(x: 0, y: 340, width: 1280, height: 80), size: 48, color: gray)
                     }
+                case .store:
+                    self.drawText("Juegos para jugar DENTRO del visor", in: CGRect(x: 0, y: 100, width: 1280, height: 70), size: 40, bold: true)
+                    self.drawText("La Escuela: juntá 7 libretas y escapá del Profe", in: CGRect(x: 0, y: 330, width: 1280, height: 50), size: 32, color: gray)
+                    self.drawText("Para moverte necesitás el control (puente PC o MFi)", in: CGRect(x: 0, y: 380, width: 1280, height: 50), size: 28, color: gray)
+                    self.drawText("Stick: caminar · LT: correr · A: usar · cruceta: inventario · RT: objeto", in: CGRect(x: 0, y: 430, width: 1280, height: 50), size: 26, color: gray)
                 case .mapping:
                     self.drawText("Elegí una acción y después presioná el botón del control", in: CGRect(x: 0, y: 676, width: 1280, height: 36), size: 24, color: gray)
                 case .settings:
